@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "utra-tracker"
+version = "0.1.0"
+description = "Real time robot detector and tracker for an overhead maze camera"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ultralytics>=8.4.0",
+    "lap>=0.5.12",
+    "pyyaml>=6.0",
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Text tokenizer, only needed by `utra-track prepare` to bake prompts.
+prepare = ["clip @ git+https://github.com/ultralytics/CLIP.git"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+utra-track = "utra_tracker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# The installer may be launched by an old interpreter and must say so clearly.
+"install.py" = ["UP036"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

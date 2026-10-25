@@ -1,0 +1,34 @@
+# Environments
+.venv/
+venv/
+env/
+
+# Models and run outputs
+models/
+runs/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ts
+*.mp4
+*.avi
+*.mov
+
+# Python caches and build files
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

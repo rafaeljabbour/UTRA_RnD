@@ -1,0 +1,27 @@
+# Camera index, video file path, or rtsp:// or http:// URL.
+source: 0
+
+model:
+  # Baked detector used at runtime. Point this at a fine tuned .pt to swap models.
+  weights: models/robot_detector.pt
+  # Open vocabulary base model and prompts, only used by `utra-track prepare`.
+  base: yoloe-26m-seg.pt
+  classes:
+    - white disk robot
+    - mobile robot
+    - robot car
+
+detect:
+  conf: 0.25
+  iou: 0.5
+  imgsz: 640
+  # auto picks cuda when available, otherwise cpu.
+  device: auto
+
+tracker: bytetrack.yaml
+display: true
+
+output:
+  dir: runs
+  # Off by default so faces of people near the maze are never stored.
+  save_video: false
