@@ -11,7 +11,7 @@ from pathlib import Path
 
 from utra_tracker import __version__
 from utra_tracker.config import DEFAULT_CONFIG_PATH, ConfigError, load_config, with_overrides
-from utra_tracker.model import ModelError
+from utra_tracker.model import ModelError, cuda_smoke_test
 from utra_tracker.sources import SourceError
 
 
@@ -104,6 +104,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"torch        {torch.__version__}")
         print(f"cuda         {'available' if cuda else 'not available'}")
         print(f"device       {torch.cuda.get_device_name(0) if cuda else 'cpu'}")
+        if cuda:
+            works = cuda_smoke_test() is None
+            print(f"cuda works   {'yes' if works else 'no, run install.py --reinstall-torch'}")
+            ok = ok and works
     except ImportError:
         print("torch        not installed")
         ok = False

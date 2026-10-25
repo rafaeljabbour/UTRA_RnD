@@ -17,7 +17,13 @@ python install.py
 python start.py
 ```
 
-`install.py` creates `.venv`, installs PyTorch with CUDA if `nvidia-smi` is found and CPU PyTorch otherwise, installs this package, builds the model and runs `utra-track check`. It is safe to rerun. Options: `--cpu`, `--cuda cu126` or the `UTRA_TORCH_CUDA` env var to pick another CUDA wheel, default `cu128`, `--reinstall-torch`, `--skip-prepare`.
+`install.py` creates `.venv`, installs PyTorch, installs this package, builds the model and runs `utra-track check`. It is safe to rerun.
+
+The PyTorch wheel is picked from the GPU that `nvidia-smi` reports. Turing and newer cards get `cu128`. Maxwell, Pascal and Volta cards such as the Quadro M4000 get `cu126` with `torch<2.15`, since newer wheels no longer run on them. Kepler and older cards, and PCs without an NVIDIA GPU, get CPU PyTorch. After installing, a tiny CUDA test runs and, if it fails, the installer retries once with `cu126` before warning that tracking will run on CPU.
+
+Options: `--cpu`, `--cuda <tag>` or the `UTRA_TORCH_CUDA` env var to override the automatic choice, `--reinstall-torch`, `--skip-prepare`.
+
+If `utra-track check` shows `cuda works   no`, run `python3 install.py --reinstall-torch`. Until then `detect.device: auto` falls back to CPU with a warning.
 
 `start.py` forwards any arguments to `utra-track run`, for example `python start.py --source 1 --no-show`.
 
@@ -34,7 +40,7 @@ python start.py
 | `utra-track prepare [--force]` | Download base weights, bake the prompt classes, save `model.weights` |
 | `utra-track run` | Detect and track. Flags: `--source`, `--config`, `--conf`, `--no-show`, `--save-video`, `--max-frames` |
 | `utra-track cameras` | Probe camera indices 0 to 9 and print the ones that open with their resolution |
-| `utra-track check` | Print Python, torch, CUDA, GPU, Ultralytics version and whether the model file exists |
+| `utra-track check` | Print Python, torch, CUDA, GPU, whether CUDA works, Ultralytics version and whether the model file exists |
 
 Press `q` or `Esc` in the window to stop, or Ctrl+C in the terminal. Both close the camera and flush the CSV.
 
@@ -49,7 +55,7 @@ Press `q` or `Esc` in the window to stop, or Ctrl+C in the terminal. Both close 
 | `model.base` | `yoloe-26m-seg.pt` | Open vocabulary base, only used by `prepare` |
 | `model.classes` | `white disk robot`, `mobile robot`, `robot car` | Prompts. Rerun `prepare --force` after changing |
 | `detect.conf` / `iou` / `imgsz` | `0.25` / `0.5` / `640` | |
-| `detect.device` | `auto` | `cuda:0` if available, else `cpu` |
+| `detect.device` | `auto` | `cuda:0` if available and working, else `cpu` |
 | `tracker` | `bytetrack.yaml` | Any Ultralytics tracker config |
 | `display` | `true` | Live window with boxes, IDs and FPS |
 | `output.dir` | `runs` | |

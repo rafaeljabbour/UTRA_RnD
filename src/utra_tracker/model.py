@@ -17,13 +17,40 @@ class ModelError(RuntimeError):
     """Raised when the detector cannot be prepared or loaded."""
 
 
+def cuda_smoke_test() -> str | None:
+    """Run one tiny op on the GPU and return the error text, or None when it works."""
+    import torch
+
+    try:
+        x = torch.zeros(1, device="cuda") + 1
+        torch.cuda.synchronize()
+        x.cpu()
+    except Exception as exc:
+        lines = str(exc).strip().splitlines()
+        return lines[0] if lines else type(exc).__name__
+    return None
+
+
 def resolve_device(device: str) -> str:
-    """Map auto to cuda:0 when a GPU is available, else cpu."""
+    """Map auto to cuda:0 when a GPU is available and works with this torch build, else cpu."""
     if device != "auto":
         return device
     import torch
 
-    return "cuda:0" if torch.cuda.is_available() else "cpu"
+    if not torch.cuda.is_available():
+        return "cpu"
+    error = cuda_smoke_test()
+    if error is None:
+        return "cuda:0"
+    try:
+        name = torch.cuda.get_device_name(0)
+    except Exception:
+        name = "this GPU"
+    print(
+        f"Warning: this torch build does not support {name}, running on CPU. "
+        f"Fix it with: python3 install.py --reinstall-torch. Error: {error}"
+    )
+    return "cpu"
 
 
 def prepare_model(cfg: Config, force: bool = False) -> Path:
