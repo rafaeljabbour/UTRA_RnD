@@ -25,3 +25,44 @@ output:
   dir: runs
   # Off by default so faces of people near the maze are never stored.
   save_video: false
+
+# The maze as seen by the overhead camera, one string per row of 1 ft cells.
+# . open floor, # block, L loading zone, B drop off location (named B1, B2... in reading order).
+# Row 0 is the loading zone side. This is the layout drawn in the Milestone 2 and 3 rubrics.
+arena:
+  layout:
+    - "LL..#B#B"
+    - "LL#....."
+    - ".#B##.#."
+    - "......#B"
+  cell_ft: 1.0
+  # Written by `utra-track calibrate`. Without it the whole frame is treated as the maze.
+  calibration: config/arena_calibration.json
+  # The camera sees the top of the rover, which sits above the floor and looks shifted away
+  # from the image centre. Set the lens height to correct for it, null leaves it off.
+  camera_height_ft: null
+  robot_height_ft: 0.5
+
+grading:
+  # 2 or 3 picks the MIE444 milestone rubric. 0 turns the grading dashboard off.
+  milestone: 3
+  team: ""
+  run: ""
+  # Wall contact tracking from the camera. Toggle live with the c key, or --no-collisions.
+  # When it is off the judge tallies contacts with the m and n keys instead.
+  collisions: true
+  # mask uses the segmentation outline of the rover, box uses its bounding box.
+  footprint: mask
+  # Contact shallower than this is ignored as detector noise (0.04 ft is about half an inch).
+  contact_margin_ft: 0.04
+  # A contact is major when it goes this deep into a wall or lasts this long.
+  major_depth_ft: 0.15
+  major_duration_s: 1.0
+  # Frames of contact needed to log a collision, and frames clear before it ends.
+  contact_frames: 3
+  release_frames: 6
+  # Start the run clock once the rover moves this far from where it was placed, or press space.
+  auto_start: true
+  start_move_ft: 0.25
+  # null uses the rubric limit: 300 s for milestone 2, 480 s for milestone 3.
+  time_limit_s: null

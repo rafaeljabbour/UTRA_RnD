@@ -14,10 +14,12 @@ from typing import Any
 from utra_tracker.config import Config
 from utra_tracker.model import load_model, resolve_device
 from utra_tracker.records import CsvWriter, Detection, result_to_detections, write_run_json
+from utra_tracker.session import GradingSession
 from utra_tracker.sources import open_capture, parse_source
 
 WINDOW = "utra-track"
 QUIT_KEYS = {ord("q"), ord("Q"), 27}
+NO_KEY = 255
 
 
 @dataclass
@@ -52,8 +54,12 @@ def make_run_dir(base: str) -> Path:
     return run_dir
 
 
-def run(cfg: Config, max_frames: int | None = None) -> Path:
-    """Track robots from the configured source until it ends, the user quits or Ctrl+C."""
+def run(cfg: Config, max_frames: int | None = None) -> tuple[Path, Path | None]:
+    """Track robots from the configured source until it ends, the user quits or Ctrl+C.
+
+    When grading.milestone is 2 or 3 the grading dashboard is shown and a scoresheet is written.
+    Returns the run folder and the scoresheet path, None when no run was graded.
+    """
     import cv2
 
     source = parse_source(cfg.source)
@@ -69,6 +75,10 @@ def run(cfg: Config, max_frames: int | None = None) -> Path:
     video_writer = None
     show = cfg.display and _display_available()
     smoothed_fps = 0.0
+    grading = cfg.grading.milestone in (2, 3)
+    session: GradingSession | None = None
+    sheet_path: Path | None = None
+    time_s = 0.0
     try:
         while max_frames is None or stats.frames < max_frames:
             tick = time.perf_counter()
@@ -88,6 +98,10 @@ def run(cfg: Config, max_frames: int | None = None) -> Path:
             time_s = _frame_time(stats, source.is_live, video_fps)
             detections = result_to_detections(result, stats.frames, time_s)
             csv_writer.write(detections)
+            if grading:
+                if session is None:
+                    session = GradingSession(cfg, (frame.shape[1], frame.shape[0]), run_dir)
+                session.update(stats.frames, time_s, detections)
             stats.frames += 1
             stats.detections += len(detections)
             stats.track_ids.update(d.track_id for d in detections if d.track_id >= 0)
@@ -96,7 +110,10 @@ def run(cfg: Config, max_frames: int | None = None) -> Path:
             smoothed_fps = 1 / dt if smoothed_fps == 0 else 0.9 * smoothed_fps + 0.1 / dt
             if not (show or cfg.output.save_video):
                 continue
-            annotated = annotate(frame, detections, smoothed_fps)
+            if session is not None:
+                annotated = session.render(frame, smoothed_fps)
+            else:
+                annotated = annotate(frame, detections, smoothed_fps)
             # Video stays off by default because students may be on camera and faces must never be stored.
             if cfg.output.save_video:
                 if video_writer is None:
@@ -106,6 +123,10 @@ def run(cfg: Config, max_frames: int | None = None) -> Path:
                 key = _show(annotated)
                 if key is None:
                     show = False
+                elif session is not None and key != NO_KEY:
+                    if session.key(key, time_s):
+                        stats.stop_reason = "user_quit"
+                        break
                 elif key in QUIT_KEYS:
                     stats.stop_reason = "user_quit"
                     break
@@ -122,12 +143,15 @@ def run(cfg: Config, max_frames: int | None = None) -> Path:
         if max_frames is not None and stats.frames >= max_frames:
             stats.stop_reason = "max_frames"
         summary = stats.summary()
+        if session is not None:
+            sheet_path = session.close(run_dir, time_s)
+            summary["scoresheet"] = None if sheet_path is None else sheet_path.name
         write_run_json(run_dir / "run.json", cfg.to_dict(), summary)
     print(
         f"Done: {summary['frames']} frames, {summary['detections']} detections, "
         f"{summary['unique_tracks']} tracks, {summary['fps']} fps. Saved to {run_dir}"
     )
-    return run_dir
+    return run_dir, sheet_path
 
 
 def annotate(frame: Any, detections: list[Detection], fps: float) -> Any:
