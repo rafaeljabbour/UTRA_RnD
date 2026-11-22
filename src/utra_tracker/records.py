@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ CSV_COLUMNS = (
     "cy",
 )
 UNTRACKED_ID = -1
+MAX_POLYGON_POINTS = 48
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,12 @@ class Detection:
     y1: float
     x2: float
     y2: float
+    # Segmentation outline in pixels when the model gives masks. Not written to the CSV.
+    polygon: tuple[tuple[float, float], ...] | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def box_corners(self) -> list[tuple[float, float]]:
+        return [(self.x1, self.y1), (self.x2, self.y1), (self.x2, self.y2), (self.x1, self.y2)]
 
     @property
     def cx(self) -> float:
@@ -65,6 +72,7 @@ def result_to_detections(result: Any, frame: int, time_s: float) -> list[Detecti
     confs = _as_list(boxes.conf)
     classes = _as_list(boxes.cls)
     ids = _as_list(boxes.id) if boxes.id is not None else [UNTRACKED_ID] * len(xyxy)
+    polygons = _polygons(getattr(result, "masks", None), len(xyxy))
     return [
         Detection(
             frame=frame,
@@ -76,9 +84,26 @@ def result_to_detections(result: Any, frame: int, time_s: float) -> list[Detecti
             y1=float(box[1]),
             x2=float(box[2]),
             y2=float(box[3]),
+            polygon=poly,
         )
-        for box, conf, cls, tid in zip(xyxy, confs, classes, ids, strict=True)
+        for box, conf, cls, tid, poly in zip(xyxy, confs, classes, ids, polygons, strict=True)
     ]
+
+
+def _polygons(masks: Any, count: int) -> list[tuple[tuple[float, float], ...] | None]:
+    """Mask outlines thinned to at most MAX_POLYGON_POINTS, or None per box without a usable mask."""
+    outlines = getattr(masks, "xy", None) if masks is not None else None
+    if outlines is None or len(outlines) != count:
+        return [None] * count
+    out = []
+    for outline in outlines:
+        pts = _as_list(outline)
+        if len(pts) < 3:
+            out.append(None)
+            continue
+        stride = max(1, -(-len(pts) // MAX_POLYGON_POINTS))
+        out.append(tuple((float(p[0]), float(p[1])) for p in pts[::stride]))
+    return out
 
 
 class CsvWriter:

@@ -61,6 +61,18 @@ def test_bad_yaml_raises(tmp_path):
         ({"source": True}, "source"),
         ({"tracker": "bytetrack"}, "tracker"),
         ({"output": {"save_video": "yes"}}, "save_video"),
+        ({"arena": {"layout": ["LL", "L"]}}, "same length"),
+        ({"arena": {"layout": ["LZ"]}}, "unknown cell"),
+        ({"arena": {"camera_height_ft": 0.2}}, "camera_height_ft"),
+        ({"arena": {"cell_ft": 0}}, "cell_ft"),
+        ({"grading": {"milestone": 4}}, "milestone"),
+        ({"grading": {"milestone": True}}, "milestone"),
+        ({"grading": {"footprint": "circle"}}, "footprint"),
+        ({"grading": {"collisions": "on"}}, "collisions"),
+        ({"grading": {"contact_frames": 0}}, "contact_frames"),
+        ({"grading": {"contact_margin_ft": -1}}, "contact_margin_ft"),
+        ({"grading": {"time_limit_s": 0}}, "time_limit_s"),
+        ({"grading": {"wall_hits": 1}}, "Unknown key in 'grading'"),
     ],
 )
 def test_invalid_values(data, message):
@@ -90,3 +102,23 @@ def test_to_dict_is_json_friendly():
     data = Config().to_dict()
     assert isinstance(data["model"]["classes"], list)
     assert data["output"]["save_video"] is False
+
+
+def test_default_yaml_has_rubric_maze_and_grading():
+    cfg = load_config(REPO / "config" / "default.yaml")
+    assert cfg.arena.layout == ("LL..#B#B", "LL#.....", ".#B##.#.", "......#B")
+    assert cfg.grading.milestone == 3
+    assert cfg.grading.collisions is True
+    assert cfg.arena.camera_height_ft is None
+
+
+def test_numeric_team_becomes_text():
+    cfg = config_from_dict({"grading": {"team": 7, "run": 2}})
+    assert (cfg.grading.team, cfg.grading.run) == ("7", "2")
+
+
+def test_grading_overrides():
+    cfg = with_overrides(Config(), milestone=2, team="12", run="3", collisions=False)
+    assert (cfg.grading.milestone, cfg.grading.team, cfg.grading.run) == (2, "12", "3")
+    assert cfg.grading.collisions is False
+    assert Config().to_dict()["arena"]["layout"][0] == "LL..#B#B"
