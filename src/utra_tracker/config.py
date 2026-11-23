@@ -9,11 +9,10 @@ from typing import Any
 
 import yaml
 
-from utra_tracker.maze import DEFAULT_LAYOUT, MazeError, validate_layout
+from utra_tracker.maze import DEFAULT_LAYOUT, Maze, MazeError, ZoneSpec, validate_layout
 
 DEFAULT_CONFIG_PATH = Path("config/default.yaml")
 _DEVICE_RE = re.compile(r"^(auto|cpu|mps|cuda|cuda:\d+|\d+)$")
-MILESTONES = (0, 2, 3)
 FOOTPRINTS = ("mask", "box")
 
 
@@ -56,11 +55,22 @@ class ArenaConfig:
 
 @dataclass(frozen=True)
 class GradingConfig:
-    # 2 or 3 picks the rubric, 0 turns the grading dashboard off.
-    milestone: int = 3
+    # Autograder: follow the robot from the start zone to the end zone. false shows the plain tracker.
+    enabled: bool = True
     team: str = ""
     run: str = ""
-    # Wall contact tracking. Toggle live with the c key.
+    # Zones are layout letters such as "L" or "B", or a list of [col, row] cells.
+    start_zone: ZoneSpec = "L"
+    end_zone: ZoneSpec = "B"
+    # Share of the robot outline that must be inside a zone to count as in it.
+    zone_share: float = 0.5
+    # The clock starts once the robot moves this far from where it was placed.
+    start_move_ft: float = 0.25
+    # The run ends once the robot has been still inside the end zone this long.
+    settle_s: float = 2.0
+    # The run ends as a fail after this long. null means no limit.
+    time_limit_s: float | None = 480.0
+    # Wall contact tracking, reported only. Toggle live with the c key.
     collisions: bool = True
     footprint: str = "mask"
     contact_margin_ft: float = 0.04
@@ -68,11 +78,6 @@ class GradingConfig:
     major_duration_s: float = 1.0
     contact_frames: int = 3
     release_frames: int = 6
-    # Start the clock once the robot moves this far, or press space.
-    auto_start: bool = True
-    start_move_ft: float = 0.25
-    # null uses the rubric limit, 5 min for milestone 2 and 8 min for milestone 3.
-    time_limit_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,11 @@ def config_from_dict(data: Any) -> Config:
         value = getattr(top["grading"], key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             top["grading"] = replace(top["grading"], **{key: str(value)})
+    for key in ("start_zone", "end_zone"):
+        value = getattr(top["grading"], key)
+        if isinstance(value, list):
+            cells = tuple(tuple(c) if isinstance(c, list) else c for c in value)
+            top["grading"] = replace(top["grading"], **{key: cells})
     cfg = Config(**top)
     validate(cfg)
     return cfg
@@ -137,10 +147,11 @@ def with_overrides(
     conf: float | None = None,
     display: bool | None = None,
     save_video: bool | None = None,
-    milestone: int | None = None,
+    grading: bool | None = None,
     team: str | None = None,
     run: str | None = None,
     collisions: bool | None = None,
+    time_limit_s: float | None = None,
 ) -> Config:
     """Return a copy of cfg with CLI overrides applied and validated."""
     if source is not None:
@@ -151,13 +162,16 @@ def with_overrides(
         cfg = replace(cfg, display=display)
     if save_video is not None:
         cfg = replace(cfg, output=replace(cfg.output, save_video=save_video))
-    grading = {
-        k: v
-        for k, v in {"milestone": milestone, "team": team, "run": run, "collisions": collisions}.items()
-        if v is not None
+    changes = {
+        "enabled": grading,
+        "team": team,
+        "run": run,
+        "collisions": collisions,
+        "time_limit_s": time_limit_s,
     }
-    if grading:
-        cfg = replace(cfg, grading=replace(cfg.grading, **grading))
+    changes = {k: v for k, v in changes.items() if v is not None}
+    if changes:
+        cfg = replace(cfg, grading=replace(cfg.grading, **changes))
     validate(cfg)
     return cfg
 
@@ -193,7 +207,7 @@ def validate(cfg: Config) -> None:
     _require(_is_text(cfg.output.dir), "output.dir must be a path")
     _require(isinstance(cfg.output.save_video, bool), "output.save_video must be true or false")
     _validate_arena(cfg.arena)
-    _validate_grading(cfg.grading)
+    _validate_grading(cfg.grading, cfg.arena)
 
 
 def _validate_arena(arena: ArenaConfig) -> None:
@@ -211,11 +225,17 @@ def _validate_arena(arena: ArenaConfig) -> None:
     )
 
 
-def _validate_grading(g: GradingConfig) -> None:
-    _require(
-        g.milestone in MILESTONES and not isinstance(g.milestone, bool), "grading.milestone must be 0, 2 or 3"
-    )
+def _validate_grading(g: GradingConfig, arena: ArenaConfig) -> None:
+    _require(isinstance(g.enabled, bool), "grading.enabled must be true or false")
     _require(isinstance(g.team, str) and isinstance(g.run, str), "grading.team and grading.run must be text")
+    maze = Maze(arena.layout, arena.cell_ft)
+    for key in ("start_zone", "end_zone"):
+        try:
+            maze.zone_cells(getattr(g, key))
+        except MazeError as exc:
+            raise ConfigError(f"grading.{key}: {exc}") from exc
+    _require(_is_number(g.zone_share) and 0 < g.zone_share <= 1, "grading.zone_share must be in 0 to 1")
+    _require(_is_positive(g.settle_s), "grading.settle_s must be a positive number")
     _require(isinstance(g.collisions, bool), "grading.collisions must be true or false")
     _require(g.footprint in FOOTPRINTS, "grading.footprint must be mask or box")
     _require(
@@ -229,7 +249,6 @@ def _validate_grading(g: GradingConfig) -> None:
             isinstance(value, int) and not isinstance(value, bool) and value >= 1,
             f"grading.{key} must be >= 1",
         )
-    _require(isinstance(g.auto_start, bool), "grading.auto_start must be true or false")
     _require(_is_positive(g.start_move_ft), "grading.start_move_ft must be a positive number")
     _require(
         g.time_limit_s is None or _is_positive(g.time_limit_s), "grading.time_limit_s must be null or > 0"

@@ -15,8 +15,12 @@ from functools import cached_property
 Point = tuple[float, float]
 Cell = tuple[int, int]
 
-FREE, BLOCK, LOAD, DROP = ".", "#", "L", "B"
-CELL_CHARS = {FREE, BLOCK, LOAD, DROP}
+FREE, BLOCK = ".", "#"
+# Open cells can carry a letter so zones can be named: L loading zone, B drop off,
+# S and E spare letters for a custom start or end zone.
+ZONE_CHARS = {"L", "B", "S", "E"}
+CELL_CHARS = {FREE, BLOCK} | ZONE_CHARS
+ZoneSpec = str | Sequence[Sequence[int]]
 
 # MIE444 maze from the Milestone 2 and 3 rubrics. Each character is one 1 ft square.
 # Row 0 is the side with the loading zone. Every wall in the rubric figure is the face of a block.
@@ -71,14 +75,31 @@ class Maze:
     def free_cells(self) -> tuple[Cell, ...]:
         return tuple((c, r) for r in range(self.rows) for c in range(self.cols) if self.layout[r][c] != BLOCK)
 
-    @cached_property
-    def loading_cells(self) -> frozenset[Cell]:
-        return frozenset(c for c in self.free_cells if self.kind(c) == LOAD)
+    def zone_cells(self, spec: ZoneSpec) -> frozenset[Cell]:
+        """Cells of a zone given as layout letters such as "L" or "B", or a list of [col, row]."""
+        if isinstance(spec, str):
+            letters = set(spec)
+            if not spec or not letters <= ZONE_CHARS:
+                raise MazeError(f"zone letters must be from {sorted(ZONE_CHARS)}, got {spec!r}")
+            cells = frozenset(c for c in self.free_cells if self.kind(c) in letters)
+            if not cells:
+                raise MazeError(f"the layout has no {spec!r} cells for this zone")
+            return cells
+        cells = set()
+        for item in spec or ():
+            if not (isinstance(item, (list, tuple)) and len(item) == 2 and all(_is_int(v) for v in item)):
+                raise MazeError(f"zone cells must be [col, row] pairs, got {item!r}")
+            cell = (int(item[0]), int(item[1]))
+            if not self.is_free(cell):
+                raise MazeError(f"zone cell {list(cell)} is a block or outside the maze")
+            cells.add(cell)
+        if not cells:
+            raise MazeError("a zone needs at least one cell")
+        return frozenset(cells)
 
-    @cached_property
-    def drop_cells(self) -> tuple[Cell, ...]:
-        """Drop off cells named B1, B2 and so on in reading order."""
-        return tuple(c for c in self.free_cells if self.kind(c) == DROP)
+    def zone_coverage(self, footprint: Sequence[Point], cells: frozenset[Cell]) -> float:
+        """Fraction of the footprint area inside the zone."""
+        return min(1.0, sum(self.coverage(footprint, c) for c in cells))
 
     def cell_at(self, p: Point) -> Cell | None:
         col, row = math.floor(p[0] / self.cell_ft), math.floor(p[1] / self.cell_ft)
@@ -293,3 +314,7 @@ def _solve(a: list[list[float]], b: list[float]) -> list[float]:
     for r in range(n - 1, -1, -1):
         x[r] = (rows[r][n] - sum(rows[r][k] * x[k] for k in range(r + 1, n))) / rows[r][r]
     return x
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)

@@ -1,7 +1,6 @@
-"""Turn per frame robot positions into the run facts the rubric needs.
+"""Autograder for one run: did the robot start in the start zone and end in the end zone.
 
-Plain Python, no numpy or OpenCV, so the whole referee is unit tested in CI.
-All positions are maze feet from utra_tracker.maze.
+Plain Python, no numpy or OpenCV, so it is unit tested in CI. Positions are maze feet.
 """
 
 from __future__ import annotations
@@ -14,14 +13,13 @@ from utra_tracker.config import GradingConfig
 from utra_tracker.maze import Cell, Maze, Point
 
 WAITING, RUNNING, FINISHED = "waiting", "running", "finished"
-TIME_LIMITS_S = {2: 300.0, 3: 480.0}
+PASS, FAIL = "PASS", "FAIL"
+REACHED_END, TIME_LIMIT, STOPPED = "settled in end zone", "time limit", "stopped before reaching the end zone"
 
 SMOOTHING = 0.5  # weight of the newest centre in the moving average
 JITTER_FT = 0.05  # moves smaller than this are detector noise, not distance
 STEP_INSET_FT = 0.1  # a 1 ft step counts once the centre is this far inside the new cell
-TURN_SEGMENT_FT = 0.5  # heading is measured over path pieces this long
-TURN_DEG = 45.0
-DROVE_FT = 1.0
+SETTLE_FT = 0.15  # the robot counts as still while it stays within this distance
 ARENA_MARGIN_FT = 0.5  # detections further outside the arena are ignored
 
 
@@ -42,13 +40,9 @@ class ContactEvent:
     x_ft: float
     y_ft: float
     severity: str  # minor or major
-    source: str  # camera or judge
 
     def to_dict(self) -> dict:
-        data = asdict(self)
-        for key in ("start_s", "end_s", "depth_ft", "x_ft", "y_ft"):
-            data[key] = round(data[key], 3)
-        return data
+        return {k: round(v, 3) if isinstance(v, float) else v for k, v in asdict(self).items()}
 
 
 class ContactMonitor:
@@ -109,46 +103,44 @@ class ContactMonitor:
             x_ft=active["pos"][0],
             y_ft=active["pos"][1],
             severity="major" if major else "minor",
-            source="camera",
         )
 
 
 class Referee:
-    """State machine for one graded run: waiting, running, finished."""
+    """One autograded run: waiting, running, finished. Starts and ends on its own."""
 
     def __init__(self, maze: Maze, grading: GradingConfig) -> None:
         self.maze = maze
         self.g = grading
+        self.start_cells = maze.zone_cells(grading.start_zone)
+        self.end_cells = maze.zone_cells(grading.end_zone)
         self.collisions_on = grading.collisions
-        self.time_limit_s = grading.time_limit_s or TIME_LIMITS_S.get(grading.milestone, 480.0)
-        self.target_b: int | None = None
+        self.time_limit_s = grading.time_limit_s
         self.reset()
 
     def reset(self) -> None:
         self.state = WAITING
+        self.finish_reason: str | None = None
         self.now = 0.0
         self.start_s: float | None = None
         self.end_s: float | None = None
         self.start_pos: Point | None = None
+        self.start_share = 0.0
         self.end_pos: Point | None = None
-        self.end_footprint: tuple[Point, ...] | None = None
+        self.end_share = 0.0
+        self.end_share_now = 0.0
+        self.reached_end_s: float | None = None
         self.position: Point | None = None
         self.last_obs: Observation | None = None
-        self.first_seen: Point | None = None
+        self._first: Observation | None = None
         self.path: list[tuple[float, float, float]] = []
         self.distance_ft = 0.0
         self.steps = 0
         self.cell: Cell | None = None
         self.cells_visited: set[Cell] = set()
-        self.turns = 0
-        self.lz_reached_s: float | None = None
-        self._outside_lz = False
         self._anchor: Point | None = None
-        self._heading_anchor: Point | None = None
-        self._heading: float | None = None
+        self._settle: tuple[Point, float] | None = None
         self.events: list[ContactEvent] = []
-        self.assists: list[float] = []
-        self._log: list[tuple[str, object]] = []
         self.monitor = ContactMonitor(self.g)
         self.collisions_toggled = False
 
@@ -160,67 +152,67 @@ class Referee:
         return max(end - self.start_s, 0.0)
 
     @property
-    def over_time(self) -> bool:
-        return self.elapsed_s > self.time_limit_s
-
-    @property
     def in_contact(self) -> bool:
         return self.collisions_on and self.monitor.in_contact
+
+    @property
+    def outcome(self) -> str | None:
+        if self.state != FINISHED:
+            return None
+        return PASS if self.started_in_zone and self.ended_in_zone else FAIL
+
+    @property
+    def started_in_zone(self) -> bool:
+        return self.start_share >= self.g.zone_share
+
+    @property
+    def ended_in_zone(self) -> bool:
+        return self.end_share >= self.g.zone_share
 
     def update(self, t: float, obs: Observation | None) -> ContactEvent | None:
         """Feed one frame. Returns a wall contact event when one just ended."""
         self.now = t
         if obs is not None:
             self.last_obs = obs
-            if self.position is None:
-                self.position = obs.center
-            else:
-                self.position = _mix(self.position, obs.center, SMOOTHING)
+            self.position = obs.center if self.position is None else _mix(self.position, obs.center)
         if self.state == WAITING:
-            if self.position is not None:
-                if self.first_seen is None:
-                    self.first_seen = self.position
-                moved = math.dist(self.first_seen, self.position)
-                if self.g.auto_start and moved >= self.g.start_move_ft:
-                    self.start(t, origin=self.first_seen)
+            if obs is not None and self._first is None:
+                self._first = Observation(self.position, obs.footprint, obs.conf)
+            if (
+                self._first is not None
+                and math.dist(self._first.center, self.position) >= self.g.start_move_ft
+            ):
+                self._start(t)
             return None
         if self.state != RUNNING:
             return None
+        event = None
         if obs is not None:
-            if self.start_pos is None:
-                self.start_pos = self.position
             self._advance(t, self.position)
-        if not self.collisions_on:
-            return None
-        depth = self.maze.penetration(obs.footprint) if obs is not None else None
-        event = self.monitor.update(t, depth, obs.center if obs is not None else None)
-        if event is not None:
-            self._add_event(event)
+            self._check_end_zone(t, obs)
+        if self.collisions_on:
+            depth = self.maze.penetration(obs.footprint) if obs is not None else None
+            event = self.monitor.update(t, depth, obs.center if obs is not None else None)
+            if event is not None:
+                self.events.append(event)
+        if self.state == RUNNING and self.time_limit_s is not None and self.elapsed_s >= self.time_limit_s:
+            self.finish(t, TIME_LIMIT)
         return event
 
-    def start(self, t: float, origin: Point | None = None) -> None:
-        if self.state != WAITING:
-            return
-        self.state = RUNNING
-        self.start_s = t
-        self.now = t
-        pos = origin or self.position
-        if pos is not None:
-            self.start_pos = pos
-            self._advance(t, pos)
-
-    def finish(self, t: float | None = None) -> ContactEvent | None:
+    def finish(self, t: float | None = None, reason: str = STOPPED) -> None:
+        """End the run. The end point is the last place the robot was seen."""
         if self.state != RUNNING:
-            return None
+            return
         self.now = self.now if t is None else t
         self.state = FINISHED
+        self.finish_reason = reason
         self.end_s = self.now
         self.end_pos = self.position
-        self.end_footprint = self.last_obs.footprint if self.last_obs is not None else None
+        if self.last_obs is not None:
+            self.end_share = self.maze.zone_coverage(self.last_obs.footprint, self.end_cells)
         event = self.monitor.close()
         if event is not None:
-            self._add_event(event)
-        return event
+            self.events.append(event)
 
     def toggle_collisions(self) -> bool:
         self.collisions_on = not self.collisions_on
@@ -228,106 +220,58 @@ class Referee:
         if not self.collisions_on:
             event = self.monitor.close()
             if event is not None:
-                self._add_event(event)
+                self.events.append(event)
         return self.collisions_on
 
-    def add_assist(self) -> None:
-        self.assists.append(self.now)
-        self._log.append(("assist", self.now))
-
-    def add_judge_collision(self, severity: str) -> ContactEvent:
-        x, y = self.position or (0.0, 0.0)
-        event = ContactEvent(self.now, self.now, 0.0, x, y, severity, "judge")
-        self._add_event(event)
-        return event
-
-    def undo_last(self) -> str | None:
-        """Remove the most recent collision or assist, judge or camera logged."""
-        if not self._log:
-            return None
-        kind, item = self._log.pop()
-        if kind == "assist":
-            self.assists.remove(item)
-            return "assist"
-        self.events.remove(item)
-        return f"{item.severity} collision"
-
-    def cycle_target(self) -> str | None:
-        count = len(self.maze.drop_cells)
-        if count == 0:
-            return None
-        if self.target_b is None:
-            self.target_b = 0
-        elif self.target_b + 1 >= count:
-            self.target_b = None
-        else:
-            self.target_b += 1
-        return self.target_name
-
-    @property
-    def target_name(self) -> str | None:
-        return None if self.target_b is None else f"B{self.target_b + 1}"
-
-    def collision_counts(self) -> dict[str, int]:
-        return {
-            "minor": sum(e.severity == "minor" for e in self.events),
-            "major": sum(e.severity == "major" for e in self.events),
-        }
-
-    def drop_coverage(self) -> dict[str, float]:
-        """Share of the robot footprint on each B cell at the end of the run."""
-        footprint = self.end_footprint or (self.last_obs.footprint if self.last_obs else None)
-        out = {}
-        for i, cell in enumerate(self.maze.drop_cells):
-            if footprint and len(footprint) >= 3:
-                share = self.maze.coverage(footprint, cell)
-            else:
-                pos = self.end_pos or self.position
-                share = 1.0 if pos is not None and self.maze.cell_at(pos) == cell else 0.0
-            out[f"B{i + 1}"] = round(share, 3)
-        return out
-
     def metrics(self) -> dict:
-        """JSON friendly summary of the run for the scoresheet."""
-        counts = self.collision_counts()
-        lz = self.maze.loading_cells
-        elapsed = self.elapsed_s
+        """JSON friendly result of the run."""
         end = self.end_pos or self.position
+        minor = sum(e.severity == "minor" for e in self.events)
         return {
+            "outcome": self.outcome,
             "state": self.state,
-            "elapsed_s": round(elapsed, 2),
+            "finish_reason": self.finish_reason,
+            "elapsed_s": round(self.elapsed_s, 2),
             "time_limit_s": self.time_limit_s,
-            "within_time_limit": self.state == FINISHED and elapsed <= self.time_limit_s,
+            "started_in_start_zone": self.started_in_zone,
+            "start_zone_share": round(self.start_share, 3),
             "start_ft": _round_point(self.start_pos),
-            "start_cell": _cell_list(self.maze.cell_at(self.start_pos) if self.start_pos else None),
+            "start_cell": _cell_list(self.start_pos, self.maze),
+            "ended_in_end_zone": self.ended_in_zone,
+            "end_zone_share": round(self.end_share if self.state == FINISHED else self.end_share_now, 3),
+            "reached_end_zone_s": None if self.reached_end_s is None else round(self.reached_end_s, 2),
             "end_ft": _round_point(end),
-            "end_cell": _cell_list(self.maze.cell_at(end) if end else None),
+            "end_cell": _cell_list(end, self.maze),
             "distance_ft": round(self.distance_ft, 2),
             "steps": self.steps,
             "unique_cells": len(self.cells_visited),
-            "speed_steps_per_min": round(60 * self.steps / elapsed, 2) if elapsed > 0 else 0.0,
-            "turns": self.turns,
-            "drove": self.distance_ft >= DROVE_FT,
-            "turned": self.turns > 0,
-            "lz_reached_s": None if self.lz_reached_s is None else round(self.lz_reached_s, 2),
             "collision_tracking": self.collisions_on,
             "collision_tracking_toggled": self.collisions_toggled,
-            "minor_collisions": counts["minor"],
-            "major_collisions": counts["major"],
-            "lz_collisions": sum(self.maze.cell_at((e.x_ft, e.y_ft)) in lz for e in self.events),
-            "assists": len(self.assists),
+            "minor_collisions": minor,
+            "major_collisions": len(self.events) - minor,
             "collisions": [e.to_dict() for e in self.events],
-            "assist_times_s": [round(self._rel(t), 2) for t in self.assists],
-            "target_b": self.target_name,
-            "b_coverage": self.drop_coverage(),
         }
 
-    def _rel(self, t: float) -> float:
-        return t - self.start_s if self.start_s is not None else t
+    def _start(self, t: float) -> None:
+        self.state = RUNNING
+        self.start_s = t
+        self.start_pos = self._first.center
+        self.start_share = self.maze.zone_coverage(self._first.footprint, self.start_cells)
+        self._advance(t, self.start_pos)
+        self._advance(t, self.position)
 
-    def _add_event(self, event: ContactEvent) -> None:
-        self.events.append(event)
-        self._log.append(("collision", event))
+    def _check_end_zone(self, t: float, obs: Observation) -> None:
+        self.end_share_now = self.maze.zone_coverage(obs.footprint, self.end_cells)
+        if self.end_share_now < self.g.zone_share:
+            self._settle = None
+            return
+        if self.reached_end_s is None:
+            self.reached_end_s = t - self.start_s
+        pos = self.position
+        if self._settle is None or math.dist(self._settle[0], pos) > SETTLE_FT:
+            self._settle = (pos, t)
+        elif t - self._settle[1] >= self.g.settle_s:
+            self.finish(t, REACHED_END)
 
     def _advance(self, t: float, p: Point) -> None:
         self.path.append((t, p[0], p[1]))
@@ -344,18 +288,6 @@ class Referee:
                 self.steps += abs(cell[0] - self.cell[0]) + abs(cell[1] - self.cell[1])
             self.cell = cell
             self.cells_visited.add(cell)
-            if cell not in self.maze.loading_cells:
-                self._outside_lz = True
-            elif self._outside_lz and self.lz_reached_s is None:
-                self.lz_reached_s = self._rel(t)
-        if self._heading_anchor is None:
-            self._heading_anchor = p
-        elif math.dist(self._heading_anchor, p) >= TURN_SEGMENT_FT:
-            heading = math.atan2(p[1] - self._heading_anchor[1], p[0] - self._heading_anchor[0])
-            if self._heading is not None and _angle_between(heading, self._heading) >= TURN_DEG:
-                self.turns += 1
-            self._heading = heading
-            self._heading_anchor = p
 
 
 def pick_robot(candidates: Sequence[Observation], maze: Maze, last: Point | None) -> Observation | None:
@@ -372,18 +304,14 @@ def pick_robot(candidates: Sequence[Observation], maze: Maze, last: Point | None
     return best
 
 
-def _mix(a: Point, b: Point, w: float) -> Point:
-    return (a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w)
-
-
-def _angle_between(a: float, b: float) -> float:
-    diff = math.degrees(abs(a - b)) % 360
-    return min(diff, 360 - diff)
+def _mix(a: Point, b: Point) -> Point:
+    return (a[0] + (b[0] - a[0]) * SMOOTHING, a[1] + (b[1] - a[1]) * SMOOTHING)
 
 
 def _round_point(p: Point | None) -> list[float] | None:
     return None if p is None else [round(p[0], 3), round(p[1], 3)]
 
 
-def _cell_list(cell: Cell | None) -> list[int] | None:
+def _cell_list(p: Point | None, maze: Maze) -> list[int] | None:
+    cell = maze.cell_at(p) if p is not None else None
     return None if cell is None else [cell[0], cell[1]]

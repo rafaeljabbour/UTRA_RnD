@@ -7,7 +7,7 @@ Real time detector and tracker for small student rovers in an 8 ft by 4 ft maze,
 - ByteTrack gives each robot a stable track ID.
 - Every run writes `runs/<timestamp>/detections.csv` and `run.json`.
 - Swapping in a fine tuned model is a config change: point `model.weights` at your `.pt`.
-- A grading dashboard follows the rover from its start to its end point in the MIE444 maze. It logs wall contacts if you want it to, and fills in the Milestone 2 or 3 rubric items the camera can judge. The judge marks the rest.
+- An autograder follows the rover from the start zone to the end zone of the maze and writes PASS or FAIL. It needs no judge input. Wall contacts can be tracked and reported too.
 
 ## Quick start
 
@@ -41,18 +41,16 @@ If `utra-track check` shows `cuda works   no`, run `python3 install.py --reinsta
 | `utra-track prepare [--force]` | Download base weights, bake the prompt classes, save `model.weights` |
 | `utra-track run` | Detect and track. Flags: `--source`, `--config`, `--conf`, `--no-show`, `--save-video`, `--max-frames` |
 | `utra-track calibrate` | Click the 4 maze corners once so pixels map to feet. Flags: `--source`, `--output` |
-| `utra-track grade <run dir>` | Walk through every rubric item, confirm or change the marks, print the total. `--show` only prints |
-| `utra-track leaderboard --milestone N` | Rank all runs by speed, write the speed marks into their scoresheets and print totals. `--dry-run` |
 | `utra-track cameras` | Probe camera indices 0 to 9 and print the ones that open with their resolution |
 | `utra-track check` | Print Python, torch, CUDA, GPU, whether CUDA works, Ultralytics version and whether the model file exists |
 
-`run` also takes `--milestone 2|3|0`, `--team`, `--run`, `--collisions` / `--no-collisions` and `--no-marks`.
+`run` also takes `--team`, `--run`, `--time-limit`, `--collisions` / `--no-collisions` and `--grading` / `--no-grading`.
 
 Press `q` or `Esc` in the window to stop, or Ctrl+C in the terminal. Both close the camera and flush the CSV.
 
-## Grading a run
+## Autograding a run
 
-The overhead camera must see the whole 8 ft by 4 ft maze.
+The overhead camera must see the whole 8 ft by 4 ft maze. Each run of the program grades one run of one robot, with no judge input.
 
 1. **Calibrate once per camera mount.** Run `utra-track calibrate`, then click the four inside floor corners of the arena in this order:
    1. the loading zone corner
@@ -61,54 +59,46 @@ The overhead camera must see the whole 8 ft by 4 ft maze.
    4. the last corner
    
    The maze walls are drawn over the image so you can check them, and Enter saves `config/arena_calibration.json`. Without calibration the whole frame is taken as the maze and the dashboard shows a red warning.
-2. **Start the dashboard:** `python start.py --milestone 3 --team 7 --run 1`.
-3. Place the rover. The clock starts when the rover moves 0.25 ft, or when you press space. Its start point is marked **A**.
-4. While the rover drives, the dashboard shows:
-   - its outline and trail on the camera view and on a top down map
-   - the timer against the rubric limit, 5:00 for M2 and 8:00 for M3
-   - distance, 1 ft steps, turns, when it reached the loading zone, and contacts
-   - the suggested marks so far
-5. Press space or `q` to end the run. The end point is where the rover stopped. The terminal prints the scoresheet and offers to take the judge marks right away. Enter accepts each suggestion.
-6. After all teams have run, `utra-track leaderboard --milestone 3` ranks speed and fills in the speed marks.
+2. **Start it:** `python start.py --team 7 --run 1`.
+3. Place the robot in the start zone. The clock starts when it moves 0.25 ft, and that spot is marked **A**.
+4. The run ends by itself when either of these happens:
+   - **settled in end zone:** the robot has stayed still for `settle_s` (2 s) with at least half its outline inside the end zone. Driving through an end cell does not end the run.
+   - **time limit:** `time_limit_s` (8 min) runs out.
 
-| Key | Action |
-| --- | --- |
-| space | Start or stop the run |
-| `c` | Turn camera wall collision tracking on or off |
-| `m` / `n` | Judge logs a minor / major collision, useful when tracking is off |
-| `a` | Log an assistance (someone touched the rover) |
-| `u` | Undo the last logged collision or assistance |
-| `b` | Cycle the target drop off: B1, B2, B3, B4, none. B cells are numbered left to right, top to bottom from the loading zone side |
-| `r` | Reset the run |
-| `h` | Show or hide the key help |
-| `q` / Esc | Finish and save |
+   Pressing `q`, Ctrl+C or the video ending also stops it, and the last seen position counts as the end.
+5. The run is graded:
+   - **PASS** means at least half the outline was in the start zone when it set off, and at least half was in the end zone at the end.
+   - Anything else is **FAIL**.
 
-**What the camera marks.** These are suggestions, and a judge mark always wins:
+   PASS or FAIL shows on screen for 3 seconds, then the program exits with code 0 for PASS and 1 for FAIL, so it can be scripted.
 
-| Item | How it is suggested |
-| --- | --- |
-| Functional, drives and turns | Full marks if it drove at least 1 ft and turned at least 45°. Half if it only drove |
-| No wall contact | From the minor, major and assistance tally, using the rubric steps: M3 gives 8, 7, 6 or 5, then 5 down to 2. M2 gives 2, 1.5 or 1, then 1 down to 0 |
-| Arrives at loading zone (M3) | 3 if it entered an L cell after starting outside the zone. Check the LED or screen confirmation yourself |
-| Finishes in B (M3) | 4 if at least half the rover outline is in the target B, 2 if it is partly inside |
-| Continuous run (M3) | 5 if there were no assists and it reached the loading zone and B |
-| Speed | Ranked across runs by `leaderboard`, using 1 ft steps per minute. M2 runs inside 5 minutes keep at least 2 points |
+The zones default to the loading zone `L` for the start and any `B` cell for the end. To change them, set `grading.start_zone` and `grading.end_zone` to layout letters, or to a list of `[col, row]` cells:
 
-The camera cannot judge build quality, localization difficulty, pick and place, bonus, or USB tether. The judge enters those in `utra-track grade`. For M3, setting control to `line_of_sight` scales the total to 70%.
+```yaml
+grading:
+  start_zone: L
+  end_zone: [[7, 3]]   # only the bottom right B
+```
 
-**Wall collisions.** The rover outline comes from the segmentation mask, or from the box with `grading.footprint: box`. It is mapped to maze feet and checked against the block faces and outer walls:
+Columns count 0 to 7 from the loading zone side along the 8 ft wall. Rows count 0 to 3 from the loading zone side along the 4 ft wall. You can also mark cells `S` or `E` in `arena.layout` and use `start_zone: S`, `end_zone: E`.
+
+The keys are for the operator only: `c` turns wall contact tracking on or off, `r` resets the run, `h` hides the help and `q` quits.
+
+**Wall collisions** are optional and only reported. They never change PASS or FAIL. The rover outline comes from the segmentation mask, or from the box with `grading.footprint: box`. It is mapped to maze feet and checked against the block faces and outer walls:
 
 - A contact counts after `contact_frames` frames deeper than `contact_margin_ft`.
 - It ends after `release_frames` clear frames.
 - It is **major** if it goes `major_depth_ft` deep or lasts `major_duration_s`. Otherwise it is **minor**.
 
-Tracking can be turned off in config, with `--no-collisions`, or live with `c`. The judge can then tally contacts with `m` and `n`. The camera sees the rover's top plate, which looks shifted outward near the edges of the image. If you get false contacts near the outer walls, set `arena.camera_height_ft` to correct for this, or raise `contact_margin_ft`.
+To turn tracking off, set `grading.collisions: false`, pass `--no-collisions`, or press `c`. The camera sees the rover's top plate, which looks shifted outward near the edges of the image. If you get false contacts near the outer walls, set `arena.camera_height_ft` or raise `contact_margin_ft`.
 
-Each graded run also writes these files to its folder:
+Each run writes these files to its folder:
 
-- `scoresheet.yaml`: metrics, every contact with its time and place, suggested and judge marks, totals
+- `result.json`: outcome, why the run ended, time, start and end cell, how much of the rover was inside each zone, distance, 1 ft steps and contacts
 - `track.csv`: position in feet for every frame
-- `path.png`: a top down map of the path with start, end and contacts marked. It shows no people, so it is safe to keep as evidence
+- `path.png`: a top down map of the path with the zones, start, end and contacts marked. It shows no people
+
+Every run also adds one row to `runs/results.csv`, so all teams end up in one table.
 
 ## Config
 
@@ -126,17 +116,20 @@ Each graded run also writes these files to its folder:
 | `display` | `true` | Live window with boxes, IDs and FPS |
 | `output.dir` | `runs` | |
 | `output.save_video` | `false` | See privacy note |
-| `arena.layout` | Rubric maze | One string per row of 1 ft cells: `.` open, `#` block, `L` loading zone, `B` drop off |
+| `arena.layout` | Rubric maze | One string per row of 1 ft cells: `.` open, `#` block, `L` loading zone, `B` drop off, `S` / `E` spare zone letters |
 | `arena.calibration` | `config/arena_calibration.json` | Written by `calibrate` |
 | `arena.camera_height_ft` / `robot_height_ft` | `null` / `0.5` | Parallax correction, off while the camera height is null |
-| `grading.milestone` | `3` | `2` or `3` picks the rubric, `0` shows the plain tracker |
-| `grading.collisions` | `true` | Camera wall contact tracking |
+| `grading.enabled` | `true` | Autograder on, `false` shows the plain tracker |
+| `grading.start_zone` / `end_zone` | `L` / `B` | Layout letters or a list of `[col, row]` cells |
+| `grading.zone_share` | `0.5` | Share of the outline that must be inside a zone |
+| `grading.start_move_ft` | `0.25` | Movement that starts the clock |
+| `grading.settle_s` | `2.0` | Seconds still in the end zone that end the run |
+| `grading.time_limit_s` | `480` | Run ends as FAIL after this, `null` for no limit |
+| `grading.collisions` | `true` | Wall contact tracking, reported only |
 | `grading.footprint` | `mask` | `mask` or `box` outline for contact checks |
 | `grading.contact_margin_ft` | `0.04` | Contacts shallower than this are ignored |
 | `grading.major_depth_ft` / `major_duration_s` | `0.15` / `1.0` | When a contact counts as major |
 | `grading.contact_frames` / `release_frames` | `3` / `6` | Debounce |
-| `grading.auto_start` / `start_move_ft` | `true` / `0.25` | Start the clock on first movement |
-| `grading.time_limit_s` | `null` | Uses the rubric limit: 300 s for M2, 480 s for M3 |
 
 The default prompts were picked from overhead photos of our current rover, a white round top plate. Zero shot scores are modest, about 0.35 to 0.7 on the robot, so tune `detect.conf` for your lighting and expect fine tuning to help a lot.
 
@@ -159,4 +152,4 @@ Tests need no weights, GPU or network. CI runs them on every push.
 
 1. Fine tune on our own overhead footage and ship the result as `model.weights`. Good masks make contact detection much more reliable.
 2. Find the maze corners automatically from AprilTags instead of clicking them.
-3. Check the contact thresholds against judge tallies from real runs.
+3. Check the contact thresholds against hand counts from real runs.

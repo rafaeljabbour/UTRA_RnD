@@ -1,70 +1,84 @@
+import csv
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from tests_support import finished_metrics
 from utra_tracker.calibrate import arena_mapping, load_calibration, save_calibration
-from utra_tracker.cli import _mark, main
+from utra_tracker.cli import build_parser
 from utra_tracker.maze import Maze, MazeError
 from utra_tracker.records import Detection, result_to_detections
-from utra_tracker.rubric import build_sheet, load_sheet, save_sheet
+from utra_tracker.result import SUMMARY_COLUMNS, build_result, format_result, save_result
 from utra_tracker.session import detection_to_observation
 
 
-def scripted(answers):
-    answers = iter(answers)
-    return lambda prompt: next(answers)
+def metrics(**kw):
+    m = {
+        "outcome": "PASS",
+        "state": "finished",
+        "finish_reason": "settled in end zone",
+        "elapsed_s": 42.0,
+        "time_limit_s": 480.0,
+        "started_in_start_zone": True,
+        "start_zone_share": 1.0,
+        "start_ft": [1.0, 1.0],
+        "start_cell": [1, 1],
+        "ended_in_end_zone": True,
+        "end_zone_share": 0.9,
+        "reached_end_zone_s": 40.0,
+        "end_ft": [7.5, 3.5],
+        "end_cell": [7, 3],
+        "distance_ft": 10.2,
+        "steps": 10,
+        "unique_cells": 9,
+        "collision_tracking": True,
+        "collision_tracking_toggled": False,
+        "minor_collisions": 1,
+        "major_collisions": 0,
+        "collisions": [],
+    }
+    m.update(kw)
+    return m
 
 
-def write_sheet(tmp_path, milestone=3):
-    path = tmp_path / "scoresheet.yaml"
-    save_sheet(path, build_sheet(milestone, "7", "1", finished_metrics()))
-    return path
+def test_save_result_writes_json_and_appends_summary(tmp_path):
+    for i, outcome in enumerate(["PASS", "FAIL"]):
+        run_dir = tmp_path / f"run{i}"
+        run_dir.mkdir()
+        path = save_result(run_dir, build_result(str(i), "1", metrics(outcome=outcome), calibrated=True))
+        assert json.loads(path.read_text())["outcome"] == outcome
+    rows = list(csv.DictReader((tmp_path / "results.csv").open()))
+    assert tuple(rows[0]) == SUMMARY_COLUMNS
+    assert [(r["team"], r["outcome"], r["folder"]) for r in rows] == [
+        ("0", "PASS", "run0"),
+        ("1", "FAIL", "run1"),
+    ]
+    assert rows[0]["end_cell"] == "7 3"
 
 
-def test_mark_accepts_suggestions_and_judge_values(tmp_path, capsys):
-    path = write_sheet(tmp_path)
-    # judge, team, run, control, then the 15 items of milestone 3 in order
-    items = ["", "3", "", "4", "", "", "4", "3", "2", "4", "2", "2", "", "", "1"]
-    assert _mark(path, scripted(["TA Kim", "", "2", "autonomous", *items])) == 0
-    sheet = load_sheet(path)
-    assert sheet["judge"] == "TA Kim" and sheet["run"] == "2" and sheet["control"] == "autonomous"
-    assert sheet["items"]["functional"]["judge"] == 8  # Enter confirmed the suggestion
-    assert sheet["items"]["build_quality"]["judge"] == 3
-    assert sheet["items"]["speed"]["judge"] is None  # waits for the leaderboard
-    assert sheet["totals"]["pending"] == ["speed"]
-    assert "Total" in capsys.readouterr().out
+def test_format_result():
+    text = format_result(build_result("7", "2", metrics(), calibrated=False))
+    assert "Team 7  run 2: PASS" in text
+    assert "1 minor, 0 major" in text
+    assert "not calibrated" in text
+    off = format_result(build_result("7", "2", metrics(collision_tracking=False), calibrated=True))
+    assert "not tracked" in off
 
 
-def test_mark_rejects_out_of_range_then_accepts(tmp_path, capsys):
-    path = write_sheet(tmp_path, milestone=2)
-    items = ["", "9", "abc", "1", "", "", "", "", "", "", "-1"]
-    assert _mark(path, scripted(["", "", "", *items])) == 0
-    sheet = load_sheet(path)
-    assert sheet["items"]["build_quality"]["judge"] == 1
-    assert sheet["items"]["usb_deduction"]["judge"] == -1
-    out = capsys.readouterr().out
-    assert "between 0 and 2" in out and "enter a number" in out
-
-
-def test_grade_show_and_missing_sheet(tmp_path, capsys):
-    write_sheet(tmp_path)
-    assert main(["grade", str(tmp_path), "--show"]) == 0
-    assert "MIE444 Milestone 3" in capsys.readouterr().out
-    assert main(["grade", str(tmp_path / "nope"), "--show"]) == 2
-
-
-def test_leaderboard_writes_speed(tmp_path, capsys):
-    for i, speed in enumerate([12.0, 6.0]):
-        run = tmp_path / f"run{i}"
-        run.mkdir()
-        save_sheet(
-            run / "scoresheet.yaml", build_sheet(3, str(i), "1", finished_metrics(speed_steps_per_min=speed))
-        )
-    assert main(["leaderboard", "--runs", str(tmp_path), "--milestone", "3"]) == 0
-    assert load_sheet(tmp_path / "run0")["items"]["speed"]["auto"] == 5
-    assert load_sheet(tmp_path / "run1")["items"]["speed"]["auto"] == 0
-    assert main(["leaderboard", "--runs", str(tmp_path), "--milestone", "2"]) == 1
+def test_run_flags():
+    args = build_parser().parse_args(
+        ["run", "--team", "7", "--run", "2", "--no-grading", "--no-collisions", "--time-limit", "60"]
+    )
+    assert (args.team, args.run_label, args.grading, args.collisions, args.time_limit) == (
+        "7",
+        "2",
+        False,
+        False,
+        60,
+    )
+    for removed in (["grade", "x"], ["leaderboard"]):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(removed)
 
 
 def test_calibration_roundtrip_and_scaling(tmp_path):

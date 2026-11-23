@@ -24,8 +24,8 @@ def test_default_layout_matches_rubric_figure():
     assert (maze.width_ft, maze.height_ft) == (8.0, 4.0)
     blocks = {(c, r) for r in range(4) for c in range(8) if not maze.is_free((c, r))}
     assert blocks == {(4, 0), (6, 0), (2, 1), (1, 2), (3, 2), (4, 2), (6, 2), (6, 3)}
-    assert maze.loading_cells == {(0, 0), (1, 0), (0, 1), (1, 1)}
-    assert maze.drop_cells == ((5, 0), (7, 0), (2, 2), (7, 3))
+    assert maze.zone_cells("L") == {(0, 0), (1, 0), (0, 1), (1, 1)}
+    assert maze.zone_cells("B") == {(5, 0), (7, 0), (2, 2), (7, 3)}
 
 
 def test_walls_are_block_faces_and_border():
@@ -109,3 +109,21 @@ def test_polygon_helpers():
     assert not point_in_polygon((3.0, 1.0), sq)
     circle = [(math.cos(a / 10 * math.tau), math.sin(a / 10 * math.tau)) for a in range(10)]
     assert polygon_centroid(circle) == pytest.approx((0.0, 0.0), abs=1e-9)
+
+
+def test_zone_cells_specs():
+    maze = Maze()
+    assert maze.zone_cells("LB") == maze.zone_cells("L") | maze.zone_cells("B")
+    assert maze.zone_cells([[7, 3], (5, 1)]) == {(7, 3), (5, 1)}
+    for bad in ("", "X", "S", [[4, 0]], [[9, 9]], [[1]], [], [[True, 0]]):
+        with pytest.raises(MazeError):
+            maze.zone_cells(bad)
+    custom = Maze(("S..E", "...."))
+    assert custom.zone_cells("S") == {(0, 0)} and custom.zone_cells("E") == {(3, 0)}
+
+
+def test_zone_coverage_spans_cells():
+    maze = Maze()
+    lz = maze.zone_cells("L")
+    assert maze.zone_coverage(square(1.0, 1.0, 0.4), lz) == pytest.approx(1.0)
+    assert maze.zone_coverage(square(2.0, 0.5, 0.3), lz) == pytest.approx(0.5, abs=0.08)

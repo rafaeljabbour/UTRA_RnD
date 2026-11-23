@@ -4,7 +4,20 @@ import pytest
 
 from utra_tracker.config import GradingConfig
 from utra_tracker.maze import Maze
-from utra_tracker.referee import FINISHED, RUNNING, WAITING, ContactMonitor, Observation, Referee, pick_robot
+from utra_tracker.referee import (
+    FAIL,
+    FINISHED,
+    PASS,
+    REACHED_END,
+    RUNNING,
+    STOPPED,
+    TIME_LIMIT,
+    WAITING,
+    ContactMonitor,
+    Observation,
+    Referee,
+    pick_robot,
+)
 
 FPS = 10
 
@@ -43,63 +56,115 @@ def referee(**kw):
     return Referee(Maze(), GradingConfig(**kw))
 
 
-def test_auto_start_records_start_where_robot_was_placed():
+ROUTE_TO_B4 = ((2.5, 0.5), (3.5, 0.5), (3.5, 1.5), (7.5, 1.5), (7.5, 3.5))
+
+
+def test_clock_starts_when_robot_moves():
     ref = referee()
     d = Driver(ref)
-    d.hold(3.5, 1.5, 10)
+    d.hold(1.0, 1.0, 10)
     assert ref.state == WAITING
-    d.drive((3.5, 0.5))
+    d.drive((2.5, 0.5))
     assert ref.state == RUNNING
-    assert ref.start_pos == pytest.approx((3.5, 1.5), abs=0.01)
+    assert ref.start_pos == pytest.approx((1.0, 1.0), abs=0.01)
+    assert ref.started_in_zone
 
 
-def test_no_auto_start_waits_for_space():
-    ref = referee(auto_start=False)
+def test_pass_from_loading_zone_to_b_finishes_by_itself():
+    ref = referee(settle_s=2.0)
     d = Driver(ref)
-    d.hold(3.5, 1.5, 3)
-    d.drive((3.5, 0.5))
-    assert ref.state == WAITING
-    ref.start(d.t)
+    d.hold(1.0, 1.0, 5)
+    d.drive(*ROUTE_TO_B4)
     assert ref.state == RUNNING
+    d.hold(7.5, 3.5, 25)
+    assert ref.state == FINISHED
+    assert ref.finish_reason == REACHED_END
+    assert ref.outcome == PASS
+    m = ref.metrics()
+    assert m["start_cell"] == [1, 1] and m["end_cell"] == [7, 3]
+    assert m["end_zone_share"] == pytest.approx(1.0)
+    assert m["reached_end_zone_s"] is not None
+    assert m["steps"] == 9  # (1,0) to (3,0), down to (3,1), across to (7,1), down to (7,3)
+    # Smoothing rounds the corners a little.
+    assert m["distance_ft"] == pytest.approx(10.0, abs=0.8)
 
 
-def test_full_run_metrics():
+def test_passing_through_an_end_cell_does_not_finish():
+    ref = referee(settle_s=2.0)
+    d = Driver(ref)
+    d.hold(1.0, 1.0, 5)
+    d.drive((2.5, 0.5), (3.5, 0.5), (3.5, 1.5), (5.5, 1.5), (5.5, 0.5), (5.5, 1.5))
+    assert ref.state == RUNNING
+    assert ref.reached_end_s is not None
+
+
+def test_fail_when_started_outside_start_zone():
     ref = referee()
     d = Driver(ref)
     d.hold(3.5, 1.5, 5)
-    d.drive((3.5, 0.5), (1.5, 0.5), (3.5, 0.5), (3.5, 1.5), (7.5, 1.5), (7.5, 3.5))
-    d.hold(7.5, 3.5, 10)
-    ref.target_b = 3
-    ref.finish(d.t)
-    m = ref.metrics()
+    d.drive((3.5, 1.5 - 0.01), (7.5, 1.5), (7.5, 3.5))
+    d.hold(7.5, 3.5, 30)
     assert ref.state == FINISHED
-    assert m["steps"] == 12
-    # Smoothing rounds the corners a little, the rubric counts 1 ft steps anyway.
-    assert m["distance_ft"] == pytest.approx(12.0, abs=0.8)
-    assert m["turns"] >= 4 and m["drove"] and m["turned"]
-    assert m["lz_reached_s"] is not None
-    assert m["minor_collisions"] == m["major_collisions"] == 0
-    assert m["end_cell"] == [7, 3]
-    assert m["b_coverage"]["B4"] == pytest.approx(1.0)
-    assert m["within_time_limit"]
-    assert m["speed_steps_per_min"] > 0
+    assert not ref.started_in_zone and ref.ended_in_zone
+    assert ref.outcome == FAIL
 
 
-def test_starting_inside_loading_zone_is_not_an_arrival():
+def test_time_limit_ends_run_as_fail():
+    ref = referee(time_limit_s=3.0)
+    d = Driver(ref)
+    d.hold(1.0, 1.0, 5)
+    d.drive((2.5, 0.5), (3.5, 0.5))
+    d.hold(3.5, 0.5, 30)
+    assert ref.state == FINISHED and ref.finish_reason == TIME_LIMIT
+    assert ref.outcome == FAIL
+    assert ref.elapsed_s == pytest.approx(3.0, abs=0.15)
+
+
+def test_no_time_limit():
+    ref = referee(time_limit_s=None)
+    d = Driver(ref)
+    d.hold(1.0, 1.0, 3)
+    d.drive((2.5, 0.5))
+    d.hold(2.5, 0.5, 3000)
+    assert ref.state == RUNNING
+
+
+def test_stopping_early_uses_last_position():
     ref = referee()
     d = Driver(ref)
-    d.hold(0.5, 0.5, 3)
-    d.drive((1.5, 0.5))
-    assert ref.lz_reached_s is None
-    d.drive((2.5, 0.5), (1.5, 0.5))
-    assert ref.lz_reached_s is not None
+    d.hold(1.0, 1.0, 3)
+    d.drive((2.5, 0.5), (3.5, 0.5))
+    ref.finish(d.t)
+    assert ref.finish_reason == STOPPED and ref.outcome == FAIL
+    assert ref.metrics()["end_cell"] == [3, 0]
+
+
+def test_partly_in_end_zone_is_not_enough():
+    ref = referee()
+    d = Driver(ref)
+    d.hold(1.0, 1.0, 3)
+    d.drive((2.5, 0.5), (3.5, 0.5), (3.5, 1.5), (7.5, 1.5), (7.5, 2.9))
+    d.hold(7.5, 2.9, 30)
+    assert ref.state == RUNNING
+    ref.finish(d.t)
+    assert 0 < ref.end_share < 0.5 and ref.outcome == FAIL
+
+
+def test_custom_zones_from_cells():
+    ref = referee(start_zone=((3, 1),), end_zone=((5, 1),))
+    d = Driver(ref)
+    d.hold(3.5, 1.5, 3)
+    d.drive((5.5, 1.5))
+    d.hold(5.5, 1.5, 30)
+    assert ref.outcome == PASS
 
 
 def test_contact_is_debounced_and_graded():
     ref = referee(contact_frames=3, release_frames=3, major_duration_s=1.0, major_depth_ft=0.15)
     d = Driver(ref)
-    d.hold(4.5, 1.5, 3)
-    ref.start(d.t)
+    d.hold(3.5, 1.5, 3)
+    d.drive((4.5, 1.5))
+    assert ref.state == RUNNING
     # Block (4, 0) ends at y = 1, so a 0.35 ft radius robot at y = 1.30 is 0.05 ft into it.
     d.hold(4.5, 1.30, 2)  # only 2 frames: ignored
     d.hold(4.5, 1.5, 5)
@@ -116,8 +181,8 @@ def test_contact_is_debounced_and_graded():
 def test_collision_toggle_stops_camera_events():
     ref = referee(contact_frames=1, release_frames=1)
     d = Driver(ref)
-    d.hold(4.5, 1.5, 2)
-    ref.start(d.t)
+    d.hold(3.5, 1.5, 3)
+    d.drive((4.5, 1.5))
     assert ref.toggle_collisions() is False
     d.hold(4.5, 1.2, 20)
     d.hold(4.5, 1.5, 3)
@@ -126,33 +191,17 @@ def test_collision_toggle_stops_camera_events():
     d.hold(4.5, 1.2, 3)
     d.hold(4.5, 1.5, 3)
     assert len(ref.events) == 1
-    assert ref.metrics()["collision_tracking_toggled"]
+    m = ref.metrics()
+    assert m["collision_tracking_toggled"] and m["major_collisions"] + m["minor_collisions"] == 1
 
 
-def test_judge_logs_and_undo():
+def test_reset_starts_over():
     ref = referee()
-    ref.start(0.0)
-    ref.add_judge_collision("minor")
-    ref.add_assist()
-    ref.add_judge_collision("major")
-    assert ref.collision_counts() == {"minor": 1, "major": 1}
-    assert ref.undo_last() == "major collision"
-    assert ref.undo_last() == "assist"
-    assert ref.assists == []
-    assert ref.undo_last() == "minor collision"
-    assert ref.undo_last() is None
-
-
-def test_cycle_target_wraps_to_none():
-    ref = referee()
-    names = [ref.cycle_target() for _ in range(5)]
-    assert names == ["B1", "B2", "B3", "B4", None]
-
-
-def test_time_limit_follows_milestone():
-    assert referee(milestone=2).time_limit_s == 300
-    assert referee(milestone=3).time_limit_s == 480
-    assert referee(milestone=3, time_limit_s=60.0).time_limit_s == 60
+    d = Driver(ref)
+    d.hold(1.0, 1.0, 3)
+    d.drive((2.5, 0.5))
+    ref.reset()
+    assert ref.state == WAITING and ref.path == [] and ref.start_pos is None
 
 
 def test_monitor_flushes_open_contact():

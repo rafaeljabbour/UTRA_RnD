@@ -65,8 +65,12 @@ def test_bad_yaml_raises(tmp_path):
         ({"arena": {"layout": ["LZ"]}}, "unknown cell"),
         ({"arena": {"camera_height_ft": 0.2}}, "camera_height_ft"),
         ({"arena": {"cell_ft": 0}}, "cell_ft"),
-        ({"grading": {"milestone": 4}}, "milestone"),
-        ({"grading": {"milestone": True}}, "milestone"),
+        ({"grading": {"enabled": "yes"}}, "enabled"),
+        ({"grading": {"start_zone": "X"}}, "start_zone"),
+        ({"grading": {"end_zone": [[4, 0]]}}, "end_zone"),
+        ({"grading": {"end_zone": []}}, "end_zone"),
+        ({"grading": {"zone_share": 0}}, "zone_share"),
+        ({"grading": {"settle_s": 0}}, "settle_s"),
         ({"grading": {"footprint": "circle"}}, "footprint"),
         ({"grading": {"collisions": "on"}}, "collisions"),
         ({"grading": {"contact_frames": 0}}, "contact_frames"),
@@ -107,7 +111,9 @@ def test_to_dict_is_json_friendly():
 def test_default_yaml_has_rubric_maze_and_grading():
     cfg = load_config(REPO / "config" / "default.yaml")
     assert cfg.arena.layout == ("LL..#B#B", "LL#.....", ".#B##.#.", "......#B")
-    assert cfg.grading.milestone == 3
+    assert cfg.grading.enabled is True
+    assert (cfg.grading.start_zone, cfg.grading.end_zone) == ("L", "B")
+    assert cfg.grading.time_limit_s == 480
     assert cfg.grading.collisions is True
     assert cfg.arena.camera_height_ft is None
 
@@ -118,7 +124,14 @@ def test_numeric_team_becomes_text():
 
 
 def test_grading_overrides():
-    cfg = with_overrides(Config(), milestone=2, team="12", run="3", collisions=False)
-    assert (cfg.grading.milestone, cfg.grading.team, cfg.grading.run) == (2, "12", "3")
+    cfg = with_overrides(Config(), grading=False, team="12", run="3", collisions=False, time_limit_s=60.0)
+    assert (cfg.grading.enabled, cfg.grading.team, cfg.grading.run) == (False, "12", "3")
+    assert cfg.grading.time_limit_s == 60.0
     assert cfg.grading.collisions is False
     assert Config().to_dict()["arena"]["layout"][0] == "LL..#B#B"
+
+
+def test_zone_cells_from_yaml_lists_become_tuples():
+    cfg = config_from_dict({"grading": {"start_zone": [[3, 1]], "end_zone": [[7, 3], [7, 2]]}})
+    assert cfg.grading.start_zone == ((3, 1),)
+    assert cfg.grading.end_zone == ((7, 3), (7, 2))

@@ -27,7 +27,7 @@ output:
   save_video: false
 
 # The maze as seen by the overhead camera, one string per row of 1 ft cells.
-# . open floor, # block, L loading zone, B drop off location (named B1, B2... in reading order).
+# . open floor, # block, L loading zone, B drop off. S and E are spare letters for custom zones.
 # Row 0 is the loading zone side. This is the layout drawn in the Milestone 2 and 3 rubrics.
 arena:
   layout:
@@ -44,12 +44,24 @@ arena:
   robot_height_ft: 0.5
 
 grading:
-  # 2 or 3 picks the MIE444 milestone rubric. 0 turns the grading dashboard off.
-  milestone: 3
+  # Autograder: follow the robot from the start zone to the end zone. false shows the plain tracker.
+  enabled: true
   team: ""
   run: ""
-  # Wall contact tracking from the camera. Toggle live with the c key, or --no-collisions.
-  # When it is off the judge tallies contacts with the m and n keys instead.
+  # Zones are layout letters ("L", "B", "S", "E", or several like "LS"),
+  # or a list of [col, row] cells counted from 0, e.g. [[7, 3]] for the bottom right cell.
+  start_zone: L
+  end_zone: B
+  # Share of the robot outline that must be inside a zone to count as in it.
+  zone_share: 0.5
+  # The clock starts once the robot moves this far from where it was placed.
+  start_move_ft: 0.25
+  # The run ends as soon as the robot has been still inside the end zone this long.
+  settle_s: 2.0
+  # The run ends as a fail after this many seconds. null means no limit.
+  time_limit_s: 480
+  # Wall contact tracking from the camera, reported in the result only.
+  # Toggle live with the c key, or --no-collisions.
   collisions: true
   # mask uses the segmentation outline of the rover, box uses its bounding box.
   footprint: mask
@@ -61,8 +73,3 @@ grading:
   # Frames of contact needed to log a collision, and frames clear before it ends.
   contact_frames: 3
   release_frames: 6
-  # Start the run clock once the rover moves this far from where it was placed, or press space.
-  auto_start: true
-  start_move_ft: 0.25
-  # null uses the rubric limit: 300 s for milestone 2, 480 s for milestone 3.
-  time_limit_s: null
